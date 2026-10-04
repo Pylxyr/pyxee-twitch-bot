@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from twitchio.ext import commands
 
 from twitch_radio.chatevent import display_name_of
+from twitch_radio.textutil import parse_uint
 from twitch_radio.toggles import FeatureToggles
 from twitch_radio.tunables import TwitchTunables
 
@@ -28,11 +29,11 @@ class GamesComponent(commands.Component):
             await self.bot.safe_reply(ctx, "Duels are turned off.")
             return
         target = target.strip().lstrip("@")
-        if not target or not amount.isdigit() or int(amount) < 1:
+        bet = parse_uint(amount)
+        if not target or bet is None or bet < 1:
             await self.bot.safe_reply(ctx, "Usage: !duel <user> <amount>")
             return
         tunables = await self._tunables()
-        bet = int(amount)
         if not tunables.duel_min_bet <= bet <= tunables.duel_max_bet:
             await self.bot.safe_reply(ctx, f"Duel bets must be between {tunables.duel_min_bet} and {tunables.duel_max_bet}.")
             return
@@ -40,7 +41,7 @@ class GamesComponent(commands.Component):
         challenger_name = display_name_of(ctx.chatter)
         found = await self.bot.db.find_by_name(target)
         if found is None:
-            await self.bot.safe_reply(ctx, f"I haven't seen {target} in chat yet.")
+            await self.bot.safe_reply(ctx, f"I haven't seen {self.bot.automod.scrub(target, 32)} in chat yet.")
             return
         target_id, target_name = found
         stats = await self.bot.db.get_stats(challenger_id)

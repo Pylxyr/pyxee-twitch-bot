@@ -81,3 +81,33 @@ def test_permits_expire():
     assert book.active("alice")
     now[0] = 61
     assert not book.active("alice")
+
+
+def test_term_matching_sees_through_invisible_characters_accents_and_homoglyphs():
+    m = TermMatcher(["badword"])
+    for sneaky in (
+        "BADWORD",
+        "b\u200badword",  # zero-width space
+        "ba\u00addword",  # soft hyphen
+        "b\u0430dword",  # Cyrillic a
+        "\uff42\uff41\uff44\uff57\uff4f\uff52\uff44",  # fullwidth
+        "bad\u0301word",  # combining accent
+    ):
+        assert m.find(sneaky) == "badword", sneaky
+    assert m.find("badwords") is None  # still whole-word
+    assert m.find("bad word") is None
+
+
+def test_blocklist_entries_are_normalised_too():
+    assert TermMatcher(["B\u0430dWord"]).find("badword") == "badword"
+
+
+def test_link_detection_sees_through_obfuscation_but_not_ordinary_speech():
+    assert find_link("go to discord[.]gg/x") == "discord.gg"
+    assert find_link("evil(dot)com") == "evil.com"
+    assert find_link("\uff45\uff56\uff49\uff4c.com") == "evil.com"  # fullwidth letters
+    assert find_link("evil\u2024com") == "evil.com"  # one-dot leader
+    assert find_link("this is evil.casino now") == "evil.casino"  # newer TLDs
+    assert find_link("the dot com bubble") is None
+    assert find_link("yeah.it was fine") is None
+    assert find_link("see evil[.]com", allowed_domains=["evil.com"]) is None

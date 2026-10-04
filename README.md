@@ -260,9 +260,9 @@ Binds to `127.0.0.1` by default (`TWITCH_HTTP_HOST`).
 |---|---|---|
 | `GET /chat-overlay` | public | Recent-chat widget — see [Chat overlay](#chat-overlay) |
 | `GET /commands` | public, rate-limited | Searchable command reference for every viewer — see [Public commands page](#public-commands-page) |
-| `GET /chat.json` | public | Recent chat messages as JSON, for a custom chat overlay |
-| `GET /ws/chat` | public | WebSocket version, pushed on every new message |
-| `GET /healthz` | public | Chat connection, live state, last-chat age, alert subscriptions, missing scopes, database status (503 if the database is down) |
+| `GET /chat.json` | public, rate-limited | Recent chat messages as JSON, for a custom chat overlay |
+| `GET /ws/chat` | public, connection-capped | WebSocket version, pushed on every new message |
+| `GET /healthz` | public, rate-limited, cached 5s | Chat connection, live state, last-chat age, alert subscriptions, missing scopes, database status (503 if the database is down) |
 | `GET /logo.png` | public | The bot mark (add `?s=32` for the favicon size) |
 | `GET`/`POST /login` | public | Sign-in page |
 | `POST /logout` | signed in | Ends the session |
@@ -278,8 +278,13 @@ With no password set, those endpoints work only from this machine itself:
 any request that arrives through a reverse proxy, or over a non-loopback
 bind address, gets a `403` unless you opt in with
 `TWITCH_SETTINGS_ALLOW_OPEN=true`. Failed sign-ins are rate-limited per
-visitor address. Everything else is always public, since it's meant to be
-fetched by OBS or a browser without auth.
+visitor address (IPv6 visitors are grouped by /64) and only two password
+checks run at a time. With no password set, `/settings` also insists the
+request's `Host` is `localhost`, `127.0.0.1` or `[::1]`, which stops a
+malicious web page from reaching it via DNS rebinding. Everything else is
+always public, since it's meant to be fetched by OBS or a browser without
+auth: `/chat.json` allows 120 requests a minute per visitor, `/healthz` 30,
+and `/ws/chat` 8 open sockets per visitor (100 in total).
 
 ## Public commands page
 
@@ -429,7 +434,23 @@ an SSH tunnel or Tailscale exposes nothing to the internet instead.
   visitor address within 5 minutes get a 429 (in-memory, resets on
   restart).
 - **The OAuth token file** (`data/twitch_tokens.json`) is `chmod 600`
-  after every save.
+  after every save; the database, its backups and the log file are created
+  `600` and `data/` and `logs/` `700`, and the systemd unit sets `UMask=0077`.
+- **The public chat overlay only shows messages that passed AutoMod.** A
+  message the filters catch never reaches `/chat-overlay`, `/chat.json` or
+  `/ws/chat`, and a message or user a moderator removes on Twitch
+  (`channel.chat.message_delete`, `channel.chat.clear_user_messages`) is
+  removed from them too. If AutoMod itself errors, the message is still shown
+  rather than blanking the overlay.
+- **The bot won't repeat a blocked word or a link in its own voice.** What
+  viewers type into `{args}`/`{touser}` of a custom command, or as the name
+  in `!give`, `!duel` and `!points`, is checked against the blocked-terms
+  list and the link filter first (whether or not those filters are switched
+  on) and replaced with `[removed]` if it trips either. The mod's own
+  command text is left exactly as written.
+- **The public `/commands` page lists role-restricted custom commands, but
+  not what they say** — a subscriber-only invite link or a moderator note
+  isn't published to everyone.
 - **The moderation filter's delete action is opt-in and scope-gated** —
   `filter_delete_enabled` needs `moderator:manage:chat_messages` on the
   bot's token (not requested by the base OAuth setup); without it, a
@@ -437,6 +458,14 @@ an SSH tunnel or Tailscale exposes nothing to the internet instead.
   warn-only rather than retrying forever.
 - **`.env` and `data/` are gitignored**, and the systemd unit's sandbox
   only allows writes under `data/`.
+
+**Trust model: moderators are administrators of the bot.** Every moderator
+(and the broadcaster) can, from chat, change economy limits (`!setlimit`),
+switch features and filters on and off (`!toggle`), manage the blocked-term
+and domain lists, timers, counters, custom commands and prediction/poll
+state, and `!setlimit` can raise bonuses and the maximum bet to very large
+values. Only add moderators you'd trust with that; there is currently no
+separate broadcaster-only tier.
 
 This isn't a hardened public-internet service — the intent is "one
 streamer's own bot, reachable by the people who need it," not "safe to
@@ -536,7 +565,8 @@ filtered; VIPs are exempt by default (`filter_exempt_vips`) and subscribers
 can be (`filter_exempt_subs`).
 
 - **Links** (`link_filter_enabled`) — matches `http(s)://`, `www.` and bare
-  domains on common spam TLDs (`discord.gg/x`, `spam.com`). Deliberately not
+  domains on common spam TLDs (`discord.gg/x`, `spam.com`), including
+  `discord[.]gg` / `spam(dot)com` and look-alike dots or fullwidth letters. Deliberately not
   every TLD, so a typo like `yeah.it was` isn't flagged. `!allowdomain`
   whitelists a domain (subdomains included); `!permit <user>` gives one
   chatter a short window.
@@ -545,7 +575,12 @@ can be (`filter_exempt_subs`).
   sets the ratio; needs 10 letters. (Third-party emotes are only recognised
   while their sources are enabled — `TWITCH_CHAT_EMOTE_SOURCES`.)
 - **Blocked terms** (`term_filter_enabled`) — whole-word, case-insensitive;
-  the list is managed with `!blockterm` and never echoed into chat.
+  the list is managed with `!blockterm` and never echoed into chat. Text is
+  compared after Unicode normalisation, so zero-width characters, soft
+  hyphens, accents/zalgo, fullwidth letters and common Cyrillic/Greek
+  lookalikes (`bаdword` with a Cyrillic *а*) don't get past it. It does not
+  catch spaced-out letters (`b a d`) or leetspeak — keep Twitch's own AutoMod
+  on as well.
 - **Response** — a public warning at most once per
   `filter_warning_cooldown_seconds` per chatter (violations are still
   counted and acted on); `filter_delete_enabled` also deletes the message;
@@ -574,13 +609,17 @@ in your channel answers to (for example `TWITCH_RESERVED_COMMANDS=sr,skip,np`
 for a separate song-request bot) so mods can't shadow them. `!comopt` sets
 a per-command cooldown and role. Custom commands never answer with an
 error (no permission, cooldown, unknown), since other bots share the prefix.
+Viewer-typed `{args}`/`{touser}` are scrubbed of blocked terms and links (see
+[Security](#security)).
 
 ### Backups and health
 
 `data/backups/community-<UTC timestamp>.db` is written on startup (unless one
 from the last ~22 hours exists) and daily, using SQLite's online backup so it
 is consistent while the bot runs; only the newest `TWITCH_DB_BACKUP_KEEP` (7)
-are kept, `0` disables. Schema changes are versioned (`PRAGMA user_version`)
+are kept, `0` disables. **Backups live on the same disk as the database**, so
+they don't protect against losing the machine or its disk: copy `data/backups/`
+somewhere else on a schedule (an `rsync`/`rclone` cron job is enough). Schema changes are versioned (`PRAGMA user_version`)
 and applied in place, so an existing `community.db` upgrades automatically.
 
 ### Alerts, shoutouts, clips & polls
@@ -616,9 +655,13 @@ harmless either way — just inert until you have.
 
 `deploy/twitch-radio.service` runs with a fairly tight systemd sandbox:
 `MemoryDenyWriteExecute`, `SystemCallFilter=@system-service`,
-`ProtectSystem=full`, `ProtectHome=read-only` with only `data/` and
-`logs/` writable, `NoNewPrivileges`, an empty capability set, and the
-rest of the usual hardening directives.
+`ProtectSystem=strict`, `ProtectHome=read-only` with only `data/` and
+`logs/` writable, `UMask=0077`, `PrivateDevices`, `ProtectProc=invisible`,
+`RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `RestrictNamespaces`,
+`NoNewPrivileges`, an empty capability set, and the rest of the usual
+hardening directives. After changing the unit, run
+`systemd-analyze security twitch-radio` and restart it to confirm the bot still
+connects.
 
 ### Resource caps (`MemoryMax`, `MemoryHigh`, `CPUQuota`)
 

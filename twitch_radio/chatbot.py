@@ -94,8 +94,8 @@ from twitch_radio.components.giveaway import GiveawayComponent
 from twitch_radio.components.info import InfoComponent
 from twitch_radio.components.moderation import USAGE as _MODERATION_USAGE
 from twitch_radio.components.moderation import ModerationComponent
-from twitch_radio.components.predictions import build_manager as build_prediction_manager
 from twitch_radio.components.predictions import PredictionsComponent
+from twitch_radio.components.predictions import build_manager as build_prediction_manager
 from twitch_radio.components.queue import QueueComponent
 from twitch_radio.components.quotes import QuotesComponent
 from twitch_radio.components.stream_info import StreamInfoComponent
@@ -114,7 +114,13 @@ from twitch_radio.toggles import FeatureToggles
 from twitch_radio.tunables import TwitchTunables
 
 if TYPE_CHECKING:
-    from twitchio import ChatMessage, StreamOffline, StreamOnline
+    from twitchio import (
+        ChannelChatClearUserMessages,
+        ChatMessage,
+        ChatMessageDelete,
+        StreamOffline,
+        StreamOnline,
+    )
     from twitchio.authentication import ValidateTokenPayload
     from twitchio.payloads import TokenRefreshedPayload
 
@@ -200,7 +206,14 @@ class TwitchChatBot(commands.Bot):
         self._points_task: asyncio.Task[None] | None = None
 
         # Services (the logic) — the components are thin command layers over these.
-        self.economy = Economy(db, tunables_store, toggles_store, status, is_live=self.channel_is_live)
+        self.economy = Economy(
+            db,
+            tunables_store,
+            toggles_store,
+            status,
+            is_live=self.channel_is_live,
+            scrub=lambda text: self.automod.scrub(text, 32),
+        )
         self.automod = AutoMod(
             db,
             tunables_store,
@@ -369,6 +382,15 @@ class TwitchChatBot(commands.Bot):
             ("subscription", eventsub.ChannelSubscribeSubscription(broadcaster_user_id=self._owner_id)),
             ("cheer", eventsub.ChannelCheerSubscription(broadcaster_user_id=self._owner_id)),
             ("raid", eventsub.ChannelRaidSubscription(to_broadcaster_user_id=self._owner_id)),
+            # Keep the public overlay in step with Twitch-side moderation.
+            (
+                "message_delete",
+                eventsub.ChatMessageDeleteSubscription(broadcaster_user_id=self._owner_id, user_id=self._bot_id),
+            ),
+            (
+                "chat_clear_user",
+                eventsub.ChatClearUserMessagesSubscription(broadcaster_user_id=self._owner_id, user_id=self._bot_id),
+            ),
             ("stream_online", eventsub.StreamOnlineSubscription(broadcaster_user_id=self._owner_id)),
             ("stream_offline", eventsub.StreamOfflineSubscription(broadcaster_user_id=self._owner_id)),
             ("hype_train_begin", eventsub.HypeTrainBeginSubscription(broadcaster_user_id=self._owner_id)),
@@ -529,9 +551,6 @@ class TwitchChatBot(commands.Bot):
             # (and the filters) as plain text.
             log.debug("Building emote fragments failed (non-fatal).", exc_info=True)
             fragments = []
-        # The overlay first: it is the one consumer that must see every message,
-        # even when a later step throws.
-        self.chat_feed.append(name, message.text, fragments=fragments or None)
         self.chat_messages += 1
         self.status.last_chat_message_at = time.monotonic()
         event = ChatEvent(
@@ -546,7 +565,25 @@ class TwitchChatBot(commands.Bot):
             is_subscriber=bool(chatter.subscriber),
         )
         self.economy.note_activity(event)
-        await self.automod.inspect(event)
+        # AutoMod runs before the overlay sees the message: the overlay (and the
+        # public /chat.json and /ws/chat that feed it) is on stream and open to
+        # anyone, so a message that breaks the rules must never reach it, not
+        # appear and then get removed. If AutoMod itself fails the message is
+        # still shown — a broken filter shouldn't blank the overlay.
+        violation = None
+        try:
+            violation = await self.automod.inspect(event)
+        except Exception:
+            log.exception("AutoMod failed on message %s.", event.message_id or "?")
+        finally:
+            if violation is None:
+                self.chat_feed.append(
+                    name,
+                    message.text,
+                    fragments=fragments or None,
+                    message_id=event.message_id,
+                    user_id=event.user_id,
+                )
 
     # -- live state and passive points -------------------------------------
 
@@ -578,6 +615,18 @@ class TwitchChatBot(commands.Bot):
             self.economy.reset_session()
         self._live_checked_at = time.monotonic()
         return flipped
+
+    async def event_message_delete(self, payload: ChatMessageDelete) -> None:
+        """A moderator (or AutoMod) removed one message on Twitch: take it off
+        the public overlay too."""
+        if self.chat_feed.remove_message(str(payload.message_id)):
+            log.debug("Removed deleted message %s from the chat overlay.", payload.message_id)
+
+    async def event_chat_clear_user(self, payload: ChannelChatClearUserMessages) -> None:
+        """A user was banned or timed out and had their messages cleared."""
+        removed = self.chat_feed.remove_user(str(payload.user.id))
+        if removed:
+            log.debug("Removed %d message(s) from the chat overlay for user %s.", removed, payload.user.id)
 
     async def event_stream_online(self, payload: StreamOnline) -> None:
         self._set_live(True)
@@ -619,6 +668,7 @@ class TwitchChatBot(commands.Bot):
             subscriber=bool(getattr(chatter, "subscriber", False)),
             vip=bool(getattr(chatter, "vip", False)),
             moderator=bool(getattr(chatter, "moderator", False)),
+            sanitize=lambda text: self.automod.scrub(text, 200),
         )
         if reply is None:
             return False

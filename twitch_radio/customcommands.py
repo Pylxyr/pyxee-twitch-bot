@@ -45,10 +45,24 @@ def clean_name(raw: str) -> str | None:
     return name if _NAME_RE.fullmatch(name) else None
 
 
-def render_response(template: str, *, user: str, args: str, count: int, channel: str) -> str:
-    """Fills {user} {touser} {args} {count} {channel}; anything else stays literal."""
+def render_response(
+    template: str,
+    *,
+    user: str,
+    args: str,
+    count: int,
+    channel: str,
+    sanitize: Callable[[str], str] | None = None,
+) -> str:
+    """Fills {user} {touser} {args} {count} {channel}; anything else stays literal.
+
+    {args} and {touser} are whatever the viewer typed, so `sanitize` (AutoMod's
+    scrub) is applied to them — the template itself is the mod's text and is
+    left exactly as written."""
     args = args.strip()
     first = args.split(maxsplit=1)[0].lstrip("@") if args else ""
+    if sanitize is not None:
+        args, first = sanitize(args), sanitize(first)
     values = {"user": user, "touser": first or user, "args": args, "count": str(count), "channel": channel}
     return _VAR_RE.sub(lambda m: values[m.group(1)], template)
 
@@ -94,6 +108,7 @@ class CustomCommandStore:
         subscriber: bool,
         vip: bool,
         moderator: bool,
+        sanitize: Callable[[str], str] | None = None,
     ) -> str | None:
         """The text to send, or None when the command doesn't exist, the chatter
         lacks the role, or it's on cooldown (all silent — a custom command never
@@ -110,4 +125,4 @@ class CustomCommandStore:
         uses = command.uses + 1
         self._cache[name] = CustomCommand(name, command.response, uses, command.cooldown_seconds, command.min_role)
         await self._db.bump_command_uses(name)
-        return render_response(command.response, user=user, args=args, count=uses, channel=channel)
+        return render_response(command.response, user=user, args=args, count=uses, channel=channel, sanitize=sanitize)

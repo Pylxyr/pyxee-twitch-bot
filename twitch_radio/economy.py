@@ -18,6 +18,7 @@ from twitch_radio.cooldown import CooldownTracker
 from twitch_radio.db import Database
 from twitch_radio.runtime import RuntimeStatus
 from twitch_radio.store import JsonStore
+from twitch_radio.textutil import parse_uint
 from twitch_radio.toggles import FeatureToggles
 from twitch_radio.tunables import TwitchTunables
 
@@ -92,13 +93,13 @@ def parse_bet(raw: str, balance: int, max_bet: int) -> tuple[int | None, str | N
         bet = min(balance, max_bet)
     elif text == "half":
         bet = min(max(1, balance // 2), max_bet)
-    elif text.endswith("%") and text[:-1].isdigit():
-        pct = int(text[:-1])
+    elif text.endswith("%") and parse_uint(text[:-1], max_digits=4) is not None:
+        pct = parse_uint(text[:-1], max_digits=4) or 0
         if not 1 <= pct <= 100:
             return None, "Percentages must be between 1% and 100%."
         bet = min(max(1, balance * pct // 100), max_bet)
-    elif text.isdigit():
-        bet = int(text)
+    elif parse_uint(text) is not None:
+        bet = parse_uint(text) or 0
         if bet < 1:
             return None, "Bet at least 1 point."
         if bet > max_bet:
@@ -128,13 +129,16 @@ class Economy:
         is_live: Callable[[], Awaitable[bool]],
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
+        scrub: Callable[[str], str] | None = None,
     ) -> None:
         self._db = db
         self._tunables_store = tunables_store
         self._toggles_store = toggles_store
         self._status = status
         self._is_live = is_live
-        self._rng = rng or random.Random()
+        # Makes a viewer-typed name safe for the bot to repeat (AutoMod.scrub).
+        self._scrub: Callable[[str], str] = scrub or (lambda text: text)
+        self._rng = rng or random.SystemRandom()
         self._clock = clock
         self._seen: dict[str, _Seen] = {}
         self._cooldowns = CooldownTracker(clock)
@@ -247,15 +251,15 @@ class Economy:
 
     async def give(self, from_id: str, from_name: str, target: str, raw_amount: str) -> str:
         target = target.strip().lstrip("@")
-        if not target or not raw_amount.strip().isdigit() or int(raw_amount) < 1:
+        amount = parse_uint(raw_amount)
+        if not target or amount is None or amount < 1:
             return "Usage: !give <user> <amount>"
-        amount = int(raw_amount)
         wait = self._cooldowns.remaining(f"give:{from_id}", GIVE_COOLDOWN_SECONDS)
         if wait > 0:
             return f"Slow down — try again in {wait:.0f}s."
         found = await self._db.find_by_name(target)
         if found is None:
-            return f"I haven't seen {target} in chat yet."
+            return f"I haven't seen {self._scrub(target)} in chat yet."
         to_id, to_name = found
         if to_id == from_id:
             return "You can't give points to yourself."

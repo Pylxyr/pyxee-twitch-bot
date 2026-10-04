@@ -21,7 +21,9 @@ from twitch_radio.filters import (
     TermMatcher,
     Violation,
     evaluate,
+    find_link,
     normalize_domain,
+    normalize_for_matching,
 )
 from twitch_radio.runtime import RuntimeStatus
 from twitch_radio.store import JsonStore
@@ -71,12 +73,12 @@ class AutoMod:
     # -- list management (chat commands) ----------------------------------
 
     async def add_term(self, term: str, by: str) -> bool:
-        added = await self._db.add_filter_value(KIND_TERM, term.strip().lower(), by)
+        added = await self._db.add_filter_value(KIND_TERM, normalize_for_matching(term).strip(), by)
         await self.load()
         return added
 
     async def remove_term(self, term: str) -> bool:
-        removed = await self._db.remove_filter_value(KIND_TERM, term.strip().lower())
+        removed = await self._db.remove_filter_value(KIND_TERM, normalize_for_matching(term).strip())
         await self.load()
         return removed
 
@@ -95,6 +97,30 @@ class AutoMod:
 
     def permit(self, login: str, seconds: int) -> None:
         self.permits.grant(login, seconds)
+
+    # -- text the bot repeats ---------------------------------------------
+
+    REMOVED = "[removed]"
+
+    def scrub(self, text: str, limit: int = 100) -> str:
+        """Makes viewer-supplied text safe for the bot to say in its own voice.
+
+        AutoMod never inspects the bot's messages, so anything it echoes
+        ({args} in a custom command, the name typed after !give or !duel)
+        would otherwise carry a blocked word or a link past every filter. A
+        value that trips the term or link list is replaced outright rather than
+        partly censored, which is easy to evade; control and invisible
+        characters are dropped and the length is capped. Applies regardless
+        of the filter toggles: it isn't moderation of the viewer, it's the
+        bot declining to repeat something.
+        """
+        cleaned = "".join(c for c in text if c.isprintable() or c == " ").strip()
+        cleaned = " ".join(cleaned.split())[:limit]
+        if not cleaned:
+            return cleaned
+        if self.matcher.find(cleaned) or find_link(cleaned, self.allowed_domains):
+            return self.REMOVED
+        return cleaned
 
     # -- the policy -------------------------------------------------------
 

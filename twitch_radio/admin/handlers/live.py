@@ -10,10 +10,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 from twitch_radio.admin.assets import static_text
-from twitch_radio.admin.context import AdminContext, client_ip, get_ctx
+from twitch_radio.admin.context import AdminContext, get_ctx, rate_key
 from twitch_radio.admin.render.commands_page import build_commands_page
 
 # Everything the public /commands page may load: its own inline style and
@@ -33,8 +33,17 @@ _COMMANDS_CSP = (
 _WS_HEARTBEAT_SECONDS = 30
 
 
+_TOO_MANY = "Too many requests — slow down."
+
+
 async def handle_chat(request: web.Request) -> web.Response:
-    return web.json_response({"messages": get_ctx(request).chat_feed.snapshot()})
+    ctx = get_ctx(request)
+    if not ctx.chat_limiter.allow(rate_key(request)):
+        return web.Response(status=429, text=_TOO_MANY, headers={"Retry-After": "10"})
+    return web.json_response({"messages": ctx.chat_feed.snapshot()})
+
+
+_HEALTH_TTL_SECONDS = 5.0
 
 
 async def handle_healthz(request: web.Request) -> web.Response:
@@ -42,13 +51,23 @@ async def handle_healthz(request: web.Request) -> web.Response:
     monitor. 503 only when the database is unreachable; a bot still waiting on
     OAuth is a normal state, reported as `chat_subscribed: false` instead."""
     ctx = get_ctx(request)
+    if not ctx.health_limiter.allow(rate_key(request)):
+        return web.Response(status=429, text=_TOO_MANY, headers={"Retry-After": "10"})
+    # The two database calls below queue behind the same lock as every chat
+    # command, so the answer is reused for a few seconds rather than recomputed
+    # per request: no client can turn this route into database load.
+    now = time.monotonic()
+    if ctx.health_cache is not None and now - ctx.health_cache[0] < _HEALTH_TTL_SECONDS:
+        return web.json_response(ctx.health_cache[1], status=ctx.health_cache[2])
     db_ok = await ctx.db.ping()
     body: dict[str, Any] = ctx.status.snapshot()
     body.update(
         ok=db_ok, db_ok=db_ok, uptime_seconds=round(time.monotonic() - ctx.started_at, 1),
         db_schema_version=await ctx.db.schema_version() if db_ok else None,
     )
-    return web.json_response(body, status=200 if db_ok else 503)
+    status = 200 if db_ok else 503
+    ctx.health_cache = (now, body, status)
+    return web.json_response(body, status=status)
 
 
 async def _push_ws(
@@ -59,39 +78,58 @@ async def _push_ws(
     unsubscribe: Callable[[asyncio.Queue[None]], None],
 ) -> web.WebSocketResponse:
     """One snapshot on connect, then another whenever the source signals a
-    change on its state queue. The queue wait times out every 30s purely so a
-    dead connection is noticed via ws.closed even when nothing is changing."""
-    ws = web.WebSocketResponse(heartbeat=_WS_HEARTBEAT_SECONDS)
+    change on its state queue (and every 30s as a keepalive that also re-syncs
+    message ages). The handler also reads from the socket, for two reasons: a
+    client that goes away is noticed at once and its connection slot freed
+    rather than at the next 30s wake-up, and nothing the client sends is
+    ever acted on — frames are discarded, and anything over 4 KB drops the
+    connection."""
+    ws = web.WebSocketResponse(heartbeat=_WS_HEARTBEAT_SECONDS, max_msg_size=4096)
     await ws.prepare(request)
     state_queue = subscribe()
+    incoming: asyncio.Future[Any] = asyncio.ensure_future(ws.receive())
+    changed: asyncio.Future[None] = asyncio.ensure_future(state_queue.get())
+    closing = (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR)
     try:
         await ws.send_json(payload())
-        while True:
-            try:
-                await asyncio.wait_for(state_queue.get(), timeout=_WS_HEARTBEAT_SECONDS)
-            except TimeoutError:
-                pass
-            if ws.closed:
-                break
-            await ws.send_json(payload())
+        while not ws.closed:
+            done, _ = await asyncio.wait(
+                {incoming, changed}, timeout=_WS_HEARTBEAT_SECONDS, return_when=asyncio.FIRST_COMPLETED
+            )
+            if incoming in done:
+                if incoming.result().type in closing:
+                    break
+                incoming = asyncio.ensure_future(ws.receive())  # ignore whatever the client said
+            if changed in done:
+                changed = asyncio.ensure_future(state_queue.get())
+            if not ws.closed:
+                await ws.send_json(payload())
     except (ConnectionResetError, asyncio.CancelledError):
         pass
     finally:
+        incoming.cancel()
+        changed.cancel()
         unsubscribe(state_queue)
     return ws
 
 
-async def handle_ws_chat(request: web.Request) -> web.WebSocketResponse:
+async def handle_ws_chat(request: web.Request) -> web.StreamResponse:
     """Push counterpart to /chat.json. There is no server-side tick here: the
     chat overlay ages messages out of its last snapshot on its own timer, so a
     quiet chat still fades old messages on schedule."""
     ctx = get_ctx(request)
-    return await _push_ws(
-        request,
-        payload=lambda: {"messages": ctx.chat_feed.snapshot()},
-        subscribe=ctx.chat_feed.subscribe_state,
-        unsubscribe=ctx.chat_feed.unsubscribe_state,
-    )
+    key = rate_key(request)
+    if not ctx.ws_limiter.acquire(key):
+        return web.Response(status=429, text="Too many open connections.", headers={"Retry-After": "10"})
+    try:
+        return await _push_ws(
+            request,
+            payload=lambda: {"messages": ctx.chat_feed.snapshot()},
+            subscribe=ctx.chat_feed.subscribe_state,
+            unsubscribe=ctx.chat_feed.unsubscribe_state,
+        )
+    finally:
+        ctx.ws_limiter.release(key)
 
 
 async def handle_chat_overlay(request: web.Request) -> web.Response:
@@ -134,7 +172,7 @@ async def handle_commands_page(request: web.Request) -> web.Response:
     query param or cookie, and the page is static output built once at
     startup — nothing here for an attacker to act on beyond that."""
     ctx = get_ctx(request)
-    if not ctx.commands_limiter.allow(client_ip(request)):
+    if not ctx.commands_limiter.allow(rate_key(request)):
         return web.Response(status=429, text="Too many requests — try again in a minute.")
     return web.Response(
         text=await _commands_html(ctx),

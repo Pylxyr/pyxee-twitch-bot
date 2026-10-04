@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from twitchio.ext import commands
 
 from twitch_radio.customcommands import MAX_RESPONSE_LENGTH, ROLES, clean_name, normalize_role
+from twitch_radio.textutil import parse_uint
 from twitch_radio.tunables import TUNABLE_BOUNDS
 
 if TYPE_CHECKING:
@@ -65,8 +66,8 @@ class CustomCommandsComponent(commands.Component):
         if option in ("cd", "cooldown"):
             if value == "default":
                 seconds = -1
-            elif value.isdigit() and int(value) <= _MAX_COOLDOWN:
-                seconds = int(value)
+            elif (parsed := parse_uint(value)) is not None and parsed <= _MAX_COOLDOWN:
+                seconds = parsed
             else:
                 await self.bot.safe_reply(ctx, f"Cooldown must be 0-{_MAX_COOLDOWN} seconds, or 'default'.")
                 return

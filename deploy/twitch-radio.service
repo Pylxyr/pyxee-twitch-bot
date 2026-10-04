@@ -39,7 +39,7 @@ CPUQuota=150%
 
 MemoryDenyWriteExecute=yes
 SystemCallFilter=@system-service
-ProtectSystem=full
+ProtectSystem=strict
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectHome=read-only
@@ -54,6 +54,19 @@ RestrictSUIDSGID=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+# New files (the database, its backups, logs, the OAuth token file) are created
+# private to the service user rather than world-readable.
+UMask=0077
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+# Only the socket families this bot uses: IP to reach Twitch and serve the web
+# UI, and Unix sockets for local name resolution.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

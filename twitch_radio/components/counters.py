@@ -7,6 +7,7 @@ from twitchio.ext import commands
 
 from twitch_radio.counters import MAX_COUNTERS_LISTED
 from twitch_radio.customcommands import clean_name
+from twitch_radio.textutil import parse_int
 
 if TYPE_CHECKING:
     from twitch_radio.chatbot import TwitchChatBot
@@ -57,11 +58,12 @@ class CountersComponent(commands.Component):
             removed = await counters.delete(name)
             await self.bot.safe_reply(ctx, f"Removed counter !{name}." if removed else f"No counter named {name}.")
         elif action == "set":
-            if not value_text.lstrip("-").isdigit():
+            new_value = parse_int(value_text)
+            if new_value is None:
                 await self.bot.safe_reply(ctx, "Usage: !counter set <name> <value>")
                 return
-            found = await counters.set_value(name, int(value_text))
-            await self.bot.safe_reply(ctx, f"!{name} set to {value_text}." if found else f"No counter named {name}.")
+            found = await counters.set_value(name, new_value)
+            await self.bot.safe_reply(ctx, f"!{name} set to {new_value}." if found else f"No counter named {name}.")
         elif action == "public":
             on = value_text.strip().lower() != "off"
             found = await counters.set_public(name, on)

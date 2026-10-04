@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from twitch_radio.customcommands import MAX_RESPONSE_LENGTH, clean_name
 from twitch_radio.db import TimerRow
+from twitch_radio.textutil import parse_uint
 
 MIN_INTERVAL_MINUTES = 5
 MAX_INTERVAL_MINUTES = 1440
@@ -20,9 +21,9 @@ def parse_add(rest: str) -> tuple[str, int, str] | str:
     name = clean_name(parts[0])
     if name is None:
         return "Timer names can use letters, numbers and _ (max 25 characters)."
-    if not parts[1].isdigit():
+    minutes = parse_uint(parts[1])
+    if minutes is None:
         return usage
-    minutes = int(parts[1])
     if not MIN_INTERVAL_MINUTES <= minutes <= MAX_INTERVAL_MINUTES:
         return f"Interval must be between {MIN_INTERVAL_MINUTES} and {MAX_INTERVAL_MINUTES} minutes."
     message = parts[2].strip()

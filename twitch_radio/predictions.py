@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from twitch_radio.textutil import parse_uint
+
 MIN_WINDOW_SECONDS = 30
 MAX_WINDOW_SECONDS = 1800
 MAX_OUTCOMES = 10  # Twitch's own cap
@@ -39,9 +41,9 @@ def parse_start_args(args: str) -> tuple[int, str, list[str]] | str:
     outcomes), or an error string."""
     usage = "Usage: !predict start <seconds> <title> ; <outcome 1> ; <outcome 2> [; up to 8 more]"
     parts = args.strip().split(maxsplit=1)
-    if len(parts) != 2 or not parts[0].isdigit():
+    seconds = parse_uint(parts[0]) if len(parts) == 2 else None
+    if seconds is None:
         return usage
-    seconds = int(parts[0])
     if not MIN_WINDOW_SECONDS <= seconds <= MAX_WINDOW_SECONDS:
         return f"Window must be between {MIN_WINDOW_SECONDS} and {MAX_WINDOW_SECONDS} seconds."
     segments = [s.strip() for s in parts[1].split(";") if s.strip()]

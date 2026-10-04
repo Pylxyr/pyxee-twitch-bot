@@ -24,7 +24,7 @@ class Giveaway:
 class GiveawayManager:
     def __init__(self, clock: Callable[[], float] = time.monotonic, rng: random.Random | None = None) -> None:
         self._clock = clock
-        self._rng = rng or random.Random()
+        self._rng = rng or random.SystemRandom()
         self.current: Giveaway | None = None
 
     def start(self, prize: str, started_by: str) -> None:

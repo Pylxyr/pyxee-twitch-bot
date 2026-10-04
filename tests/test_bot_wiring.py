@@ -82,7 +82,10 @@ def test_chat_message_flows_to_feed_economy_and_automod(tmp_path, make_db):
             await bot._process_chat(message("hello there", _chatter()))
             await bot._process_chat(message("free stuff at spam.com", _chatter("2", "Spammy")))
             await bot._process_chat(message("ignored: it's the bot", _chatter("100", "TheBot")))
-            assert bot.chat_messages == 2 and len(bot.chat_feed.snapshot()) == 2
+            # Counted and tracked, but the rule-breaking message never reaches the
+            # public overlay feed.
+            assert bot.chat_messages == 2
+            assert [m["author"] for m in bot.chat_feed.snapshot()] == ["Alice"]
             assert deleted == ["msg-1"] and "links aren't allowed" in sent[0]
             assert set(bot.economy._seen) == {"1", "2"}
             assert bot.status.last_chat_message_at is not None
@@ -246,6 +249,53 @@ def test_addcom_and_counter_add_cannot_shadow_each_other(tmp_path, make_db):
             await component.counter_cmd.callback(component, ctx, args="add hi")
             assert "already a command" in replies[-1]
             assert bot.counters.get("hi") is None
+        finally:
+            await _shutdown(bot)
+
+    run(go())
+
+
+def test_automod_failure_still_shows_the_message_and_twitch_deletes_remove_it(tmp_path, make_db):
+    async def go():
+        bot = await _bot(tmp_path, make_db)
+        try:
+            async def boom(event):
+                raise RuntimeError("filter exploded")
+
+            bot.automod.inspect = boom  # type: ignore[method-assign]
+            msg = SimpleNamespace(chatter=_chatter("7", "Gus"), text="hi chat", fragments=[], id="m-7")
+            await bot._process_chat(msg)
+            assert [m["author"] for m in bot.chat_feed.snapshot()] == ["Gus"]  # a broken filter doesn't blank the overlay
+
+            await bot.event_message_delete(SimpleNamespace(message_id="m-7"))
+            assert bot.chat_feed.snapshot() == []
+
+            await bot._process_chat(SimpleNamespace(chatter=_chatter("8", "Hal"), text="one", fragments=[], id="m-8"))
+            await bot._process_chat(SimpleNamespace(chatter=_chatter("8", "Hal"), text="two", fragments=[], id="m-9"))
+            await bot._process_chat(SimpleNamespace(chatter=_chatter("9", "Ivy"), text="keep", fragments=[], id="m-10"))
+            await bot.event_chat_clear_user(SimpleNamespace(user=SimpleNamespace(id="8")))
+            assert [m["author"] for m in bot.chat_feed.snapshot()] == ["Ivy"]
+            assert all("message_id" not in m and "user_id" not in m for m in bot.chat_feed.snapshot())
+        finally:
+            await _shutdown(bot)
+
+    run(go())
+
+
+def test_custom_command_args_are_scrubbed_but_the_template_is_not(tmp_path, make_db):
+    async def go():
+        bot = await _bot(tmp_path, make_db)
+        try:
+            await bot.automod.add_term("slur", "mod")
+            await bot.custom.save("echo", "Join https://discord.gg/ours — you said: {args}", "1")
+            ok = await bot.custom.execute("echo", user="A", args="hello  there", channel="c", default_cooldown=0,
+                                          subscriber=False, vip=False, moderator=False, sanitize=bot.automod.scrub)
+            assert ok == "Join https://discord.gg/ours — you said: hello there"  # mod's own link survives
+            for evil in ("a slur here", "go to evil.com", "evil[.]com", "s\u200blur"):
+                bot.custom._cooldowns = type(bot.custom._cooldowns)()  # reset cooldown for the test
+                out = await bot.custom.execute("echo", user="A", args=evil, channel="c", default_cooldown=0,
+                                               subscriber=False, vip=False, moderator=False, sanitize=bot.automod.scrub)
+                assert out == "Join https://discord.gg/ours — you said: [removed]", (evil, out)
         finally:
             await _shutdown(bot)
 

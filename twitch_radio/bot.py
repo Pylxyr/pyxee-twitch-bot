@@ -11,6 +11,7 @@ from twitch_radio.chatbot import TwitchChatBot
 from twitch_radio.chatfeed import ChatFeed
 from twitch_radio.config import Settings, load_settings
 from twitch_radio.db import Database
+from twitch_radio.fsutil import make_private
 from twitch_radio.maintenance import backup_loop
 from twitch_radio.runtime import RuntimeStatus
 from twitch_radio.store import JsonStore
@@ -21,7 +22,9 @@ _bg_tasks: set[asyncio.Task[object]] = set()
 def configure_logging(settings: Settings) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if settings.log_to_file:
-        handlers.append(logging.FileHandler(settings.log_dir / "twitch-radio.log", encoding="utf-8"))
+        log_path = settings.log_dir / "twitch-radio.log"
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+        make_private(log_path)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     for h in handlers:
         h.setFormatter(formatter)

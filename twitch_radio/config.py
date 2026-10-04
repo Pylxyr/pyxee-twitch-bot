@@ -7,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from twitch_radio.admin.passwords import validate_stored_password
+from twitch_radio.fsutil import private_dir
 from twitch_radio.netutil import DEFAULT_TRUSTED_PROXIES, IPNetwork, is_loopback_host, parse_networks
 from twitch_radio.runtime import DEFAULT_REPLY_SUFFIXES
 
@@ -147,8 +148,8 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    DATA_DIR.mkdir(exist_ok=True)
-    LOG_DIR.mkdir(exist_ok=True)
+    private_dir(DATA_DIR)
+    private_dir(LOG_DIR)
 
     def _required(name: str) -> str:
         value = os.getenv(name, "").strip()

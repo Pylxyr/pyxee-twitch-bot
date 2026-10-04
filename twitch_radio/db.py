@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from twitch_radio.fsutil import make_private
+
 log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
@@ -148,6 +150,8 @@ class Database:
 
     def _connect_sync(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        # Before WAL mode creates its -wal/-shm files, which copy the main file's mode.
+        make_private(self._path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA_V1)
@@ -186,6 +190,7 @@ class Database:
             conn.backup(target)
         finally:
             target.close()
+        make_private(Path(dest))
 
     async def backup_to(self, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -200,7 +205,7 @@ class Database:
             INSERT INTO viewer_stats (user_id, display_name, points, watch_seconds, updated_at)
             VALUES (?, ?, ?, 0, ?)
             ON CONFLICT(user_id) DO UPDATE SET
-                display_name = excluded.display_name,
+                display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE viewer_stats.display_name END,
                 points = points + excluded.points,
                 updated_at = excluded.updated_at
             """,
@@ -215,7 +220,7 @@ class Database:
             INSERT INTO viewer_stats (user_id, display_name, points, watch_seconds, updated_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
-                display_name = excluded.display_name,
+                display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE viewer_stats.display_name END,
                 points = points + excluded.points,
                 watch_seconds = watch_seconds + excluded.watch_seconds,
                 updated_at = excluded.updated_at
@@ -255,12 +260,16 @@ class Database:
     @staticmethod
     def _find_by_name_sync(conn: sqlite3.Connection, name: str) -> tuple[str, str] | None:
         row = conn.execute(
-            "SELECT user_id, display_name FROM viewer_stats WHERE display_name = ? COLLATE NOCASE LIMIT 1", (name,)
+            "SELECT user_id, display_name FROM viewer_stats WHERE display_name = ? COLLATE NOCASE "
+            "ORDER BY updated_at DESC, user_id LIMIT 1",
+            (name,),
         ).fetchone()
         return None if row is None else (row[0], row[1])
 
     async def find_by_name(self, name: str) -> tuple[str, str] | None:
-        """(user_id, display_name) of a chatter the bot has seen, case-insensitive."""
+        """(user_id, display_name) of a chatter the bot has seen, case-insensitive.
+        When a name has changed hands the most recently active holder wins, so a
+        stale row left by the name's previous owner can't receive points."""
         return await self._run(self._find_by_name_sync, name)
 
     @staticmethod
@@ -342,7 +351,7 @@ class Database:
             INSERT INTO viewer_stats (user_id, display_name, points, watch_seconds, updated_at, follow_bonus_claimed)
             VALUES (?, ?, ?, 0, ?, 1)
             ON CONFLICT(user_id) DO UPDATE SET
-                display_name = excluded.display_name,
+                display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE viewer_stats.display_name END,
                 points = points + excluded.points,
                 follow_bonus_claimed = 1,
                 updated_at = excluded.updated_at
@@ -594,7 +603,7 @@ class Database:
     # -- duels ----------------------------------------------------------------
 
     def _settle_duel_sync(
-        self, conn: sqlite3.Connection, winner_id: str, loser_id: str, amount: int
+        self, conn: sqlite3.Connection, winner_id: str, winner_name: str, loser_id: str, amount: int
     ) -> tuple[int, int] | None:
         """Atomically moves `amount` from loser to winner — both balances are
         re-checked here (not just at challenge time), since either side's
@@ -608,7 +617,7 @@ class Database:
             if cur.rowcount == 0:
                 conn.rollback()
                 return None
-            winner_balance = self._credit(conn, winner_id, "", amount, now)
+            winner_balance = self._credit(conn, winner_id, winner_name, amount, now)
             loser_balance = int(
                 conn.execute("SELECT points FROM viewer_stats WHERE user_id = ?", (loser_id,)).fetchone()[0]
             )
@@ -618,10 +627,12 @@ class Database:
             raise
         return winner_balance, loser_balance
 
-    async def settle_duel(self, winner_id: str, loser_id: str, amount: int) -> tuple[int, int] | None:
+    async def settle_duel(
+        self, winner_id: str, loser_id: str, amount: int, winner_name: str = ""
+    ) -> tuple[int, int] | None:
         """(winner's new balance, loser's new balance), or None if the loser
         can no longer afford the bet."""
-        return await self._run(self._settle_duel_sync, winner_id, loser_id, amount)
+        return await self._run(self._settle_duel_sync, winner_id, winner_name, loser_id, amount)
 
     # -- filter lists (blocked terms, allowed link domains) ---------------
 

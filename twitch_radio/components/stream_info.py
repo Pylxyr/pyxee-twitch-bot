@@ -8,6 +8,7 @@ from twitchio.exceptions import HTTPException
 from twitchio.ext import commands
 
 from twitch_radio.cooldown import CooldownTracker
+from twitch_radio.textutil import parse_uint
 
 if TYPE_CHECKING:
     from twitchio import PartialUser
@@ -18,6 +19,13 @@ log = logging.getLogger(__name__)
 
 _CLIP_COOLDOWN_SECONDS = 10.0
 _CLIP_COOLDOWN_KEY = "global"
+# Each of these commands costs a Twitch API call, so one chatter spamming them
+# (or a crowd all typing the same one) must not turn into API traffic. Silent,
+# like every other cooldown on the bot's info commands: replying to spam is
+# also traffic. Moderators and the broadcaster are exempt.
+_LOOKUP_USER_COOLDOWN_SECONDS = 15.0
+_LOOKUP_GLOBAL_COOLDOWN_SECONDS = 3.0
+_CLIP_USER_COOLDOWN_SECONDS = 60.0
 
 
 class StreamInfoComponent(commands.Component):
@@ -31,6 +39,22 @@ class StreamInfoComponent(commands.Component):
         self.bot = bot
         self._followage_scope_missing = False
         self._clip_cooldown = CooldownTracker()
+        self._lookup_cooldown = CooldownTracker()
+
+    def _throttled(self, ctx: commands.Context, name: str) -> bool:
+        """True (and the command should silently do nothing) when this chatter,
+        or the channel as a whole, used `name` too recently."""
+        if bool(getattr(ctx.chatter, "moderator", False)):
+            return False
+        user_key, global_key = f"{name}:{ctx.chatter.id}", f"{name}:*"
+        if (
+            self._lookup_cooldown.remaining(user_key, _LOOKUP_USER_COOLDOWN_SECONDS) > 0
+            or self._lookup_cooldown.remaining(global_key, _LOOKUP_GLOBAL_COOLDOWN_SECONDS) > 0
+        ):
+            return True
+        self._lookup_cooldown.mark(user_key)
+        self._lookup_cooldown.mark(global_key)
+        return False
 
     def _broadcaster(self) -> PartialUser:
         # PartialUser imported under TYPE_CHECKING only, so this costs
@@ -39,6 +63,8 @@ class StreamInfoComponent(commands.Component):
 
     @commands.command(name="uptime")
     async def uptime_cmd(self, ctx: commands.Context) -> None:
+        if self._throttled(ctx, "uptime"):
+            return
         try:
             stream = await self._broadcaster().fetch_stream()
         except Exception:
@@ -54,6 +80,8 @@ class StreamInfoComponent(commands.Component):
 
     @commands.command(name="title")
     async def title_cmd(self, ctx: commands.Context) -> None:
+        if self._throttled(ctx, "title"):
+            return
         try:
             info = await self._broadcaster().fetch_channel_info()
         except Exception:
@@ -64,6 +92,8 @@ class StreamInfoComponent(commands.Component):
 
     @commands.command(name="game")
     async def game_cmd(self, ctx: commands.Context) -> None:
+        if self._throttled(ctx, "game"):
+            return
         try:
             info = await self._broadcaster().fetch_channel_info()
         except Exception:
@@ -78,6 +108,8 @@ class StreamInfoComponent(commands.Component):
         chatbot.py's module docstring. token_for is the bot explicitly
         (not left to default to the broadcaster's own token), since that's
         whichever account the scope is actually granted to."""
+        if self._throttled(ctx, "followage"):
+            return
         if self._followage_scope_missing:
             await self.bot.safe_reply(ctx, "Follow lookups aren't set up for this bot yet.")
             return
@@ -117,11 +149,16 @@ class StreamInfoComponent(commands.Component):
         module docstring. Small global (not per-chatter) cooldown so
         several chatters spamming !clip at once doesn't hammer the API for
         what's usually the same moment anyway."""
+        is_mod = bool(getattr(ctx.chatter, "moderator", False))
+        user_key = f"user:{ctx.chatter.id}"
+        if not is_mod and self._clip_cooldown.remaining(user_key, _CLIP_USER_COOLDOWN_SECONDS) > 0:
+            return  # one clip a minute per chatter; silent
         remaining = self._clip_cooldown.remaining(_CLIP_COOLDOWN_KEY, _CLIP_COOLDOWN_SECONDS)
         if remaining > 0:
             await self.bot.safe_reply(ctx, f"Just made one — try again in {remaining:.0f}s.")
             return
         self._clip_cooldown.mark(_CLIP_COOLDOWN_KEY)
+        self._clip_cooldown.mark(user_key)
         try:
             clip = await self._broadcaster().create_clip(token_for=self.bot.owner_id_required)
         except HTTPException as e:
@@ -148,9 +185,8 @@ class StreamInfoComponent(commands.Component):
         if len(parts) != 2:
             await self.bot.safe_reply(ctx, usage)
             return
-        try:
-            duration = int(parts[0])
-        except ValueError:
+        duration = parse_uint(parts[0])
+        if duration is None:
             await self.bot.safe_reply(ctx, usage)
             return
         if not (15 <= duration <= 1800):

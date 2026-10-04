@@ -23,6 +23,25 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def host_without_port(host_header: str | None) -> str:
+    """'localhost:8098' -> 'localhost', '[::1]:8098' -> '::1'; '' when absent."""
+    host = (host_header or "").strip()
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def rate_limit_key(ip: str) -> str:
+    """The identity a per-client limit is counted against. An IPv6 user
+    normally holds a whole /64, so counting per full address would let one
+    machine dodge every limit by rotating addresses; those are grouped by /64.
+    IPv4 (and anything unparseable) is used as-is."""
+    parsed = _parse_ip(ip)
+    if isinstance(parsed, ipaddress.IPv6Address):
+        return str(ipaddress.ip_network(f"{parsed}/64", strict=False))
+    return str(parsed) if parsed is not None else ip
+
+
 def parse_networks(raw: str) -> tuple[tuple[IPNetwork, ...], list[str]]:
     """Comma/space separated IPs and CIDRs -> (networks, rejected tokens)."""
     networks: list[IPNetwork] = []

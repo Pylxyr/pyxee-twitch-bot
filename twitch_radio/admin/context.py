@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from twitch_radio.admin.security import AuthRateLimiter, RequestRateLimiter
+from twitch_radio.admin.security import AuthRateLimiter, ConnectionLimiter, RequestRateLimiter
 from twitch_radio.admin.sessions import SessionStore
-from twitch_radio.netutil import IPNetwork, is_trusted_peer, resolve_client_ip
+from twitch_radio.netutil import IPNetwork, is_trusted_peer, rate_limit_key, resolve_client_ip
 
 if TYPE_CHECKING:
     from twitch_radio.chatfeed import ChatFeed
@@ -53,6 +53,17 @@ class AdminContext:
     commands_limiter: RequestRateLimiter = field(default_factory=lambda: RequestRateLimiter(60, 60.0))
     # (built_at monotonic, html) for the /commands page — see handlers/live.py.
     commands_cache: tuple[float, str] | None = None
+    # The other unauthenticated routes. /chat.json is polled every couple of
+    # seconds by an overlay whose socket is down, so its ceiling is higher than
+    # the human-paced /commands; /healthz is for one uptime monitor.
+    chat_limiter: RequestRateLimiter = field(default_factory=lambda: RequestRateLimiter(120, 60.0))
+    health_limiter: RequestRateLimiter = field(default_factory=lambda: RequestRateLimiter(30, 60.0))
+    # An OBS source plus a few browser tabs per client, and a hard ceiling overall.
+    ws_limiter: ConnectionLimiter = field(default_factory=lambda: ConnectionLimiter(8, 100))
+    # (built_at monotonic, body, http status) for /healthz — see handlers/live.py.
+    health_cache: tuple[float, dict[str, object], int] | None = None
+    # scrypt verifications running right now (see handlers/login.py).
+    login_inflight: int = 0
 
 
 CTX_KEY = web.AppKey("admin_ctx", AdminContext)
@@ -66,6 +77,11 @@ def client_ip(request: web.Request) -> str:
     return resolve_client_ip(
         request.remote, request.headers.get("X-Forwarded-For"), get_ctx(request).trusted_proxies
     )
+
+
+def rate_key(request: web.Request) -> str:
+    """Per-client key for rate limits and lockouts (IPv6 grouped by /64)."""
+    return rate_limit_key(client_ip(request))
 
 
 def _trusted_header(request: web.Request, name: str) -> str | None:

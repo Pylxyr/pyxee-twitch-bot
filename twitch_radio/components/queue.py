@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from twitchio.ext import commands
 
 from twitch_radio.chatevent import display_name_of
+from twitch_radio.textutil import parse_uint
 from twitch_radio.tunables import TwitchTunables
 
 if TYPE_CHECKING:
@@ -71,7 +72,7 @@ class QueueComponent(commands.Component):
             q.clear()
             await self.bot.safe_reply(ctx, "Queue cleared.")
         elif action == "next":
-            count = int(rest.strip()) if rest.strip().isdigit() else 1
+            count = parse_uint(rest) or 1
             names = q.pop_next(count)
             await self.bot.safe_reply(ctx, f"Next up: {', '.join(names)}!" if names else "The queue is empty.")
         else:

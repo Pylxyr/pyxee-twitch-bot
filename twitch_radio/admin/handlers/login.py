@@ -7,7 +7,7 @@ import logging
 
 from aiohttp import web
 
-from twitch_radio.admin.context import AdminContext, client_ip, get_ctx
+from twitch_radio.admin.context import AdminContext, client_ip, get_ctx, rate_key
 from twitch_radio.admin.handlers.auth import (
     authorize,
     clear_session_cookie,
@@ -23,6 +23,11 @@ from twitch_radio.admin.render.login_page import render_login_page
 from twitch_radio.admin.security import safe_next_path
 
 log = logging.getLogger(__name__)
+
+# Each scrypt check holds ~32 MB while it runs, on a process that may be limited
+# to a few hundred. The per-client lockout can't help against many clients at
+# once, so this caps how many run simultaneously; extras are turned away.
+_MAX_CONCURRENT_VERIFICATIONS = 2
 
 _LOGIN_CSP = (
     "default-src 'none'; "
@@ -49,7 +54,7 @@ def _page(
     error: str | None = None,
     info: str | None = None,
 ) -> web.Response:
-    retry_after = ctx.auth_limiter.retry_after(client_ip(request))
+    retry_after = ctx.auth_limiter.retry_after(rate_key(request))
     html = render_login_page(
         next_path=next_path,
         has_logo=ctx.logo is not None,
@@ -91,19 +96,27 @@ async def handle_login_post(request: web.Request) -> web.Response:
         return protect(web.Response(status=403, text="Origin check failed — refusing to sign in."))
 
     ip = client_ip(request)
-    if ctx.auth_limiter.is_blocked(ip):
+    key = rate_key(request)
+    if ctx.auth_limiter.is_blocked(key):
         return _page(ctx, request, next_path=next_path, status=429)
+    if ctx.login_inflight >= _MAX_CONCURRENT_VERIFICATIONS:
+        return protect(web.Response(status=429, text="Busy — try again in a moment.", headers={"Retry-After": "2"}))
 
     password = form.get("password")
-    # Worker thread: a scrypt check would otherwise stall the audio feed.
-    if not isinstance(password, str) or not await asyncio.to_thread(
-        verify_password, password, ctx.settings_password
-    ):
-        ctx.auth_limiter.record_failure(ip)
+    verified = False
+    if isinstance(password, str):
+        ctx.login_inflight += 1
+        try:
+            # Worker thread: a scrypt check would otherwise stall the audio feed.
+            verified = await asyncio.to_thread(verify_password, password, ctx.settings_password)
+        finally:
+            ctx.login_inflight -= 1
+    if not verified:
+        ctx.auth_limiter.record_failure(key)
         log.warning("Failed /login attempt from %s", ip)
         return _page(ctx, request, next_path=next_path, status=401, error="Incorrect password.")
 
-    ctx.auth_limiter.record_success(ip)
+    ctx.auth_limiter.record_success(key)
     ctx.sessions.destroy(session_token(request))
     remember = bool(form.get("remember")) and ctx.sessions.remember_seconds > 0
     token = ctx.sessions.create(remember=remember)

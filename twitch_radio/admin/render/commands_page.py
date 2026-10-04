@@ -47,7 +47,13 @@ def build_commands_page(
     if custom:
         categories.append(CUSTOM_CATEGORY)
         for c in custom:
-            text = c.response if len(c.response) <= _MAX_CUSTOM_DESCRIPTION else c.response[:_MAX_CUSTOM_DESCRIPTION - 1] + "\u2026"
+            if c.min_role == "everyone":
+                text = c.response if len(c.response) <= _MAX_CUSTOM_DESCRIPTION else c.response[:_MAX_CUSTOM_DESCRIPTION - 1] + "\u2026"
+            else:
+                # This page is public. A command limited to subscribers, VIPs or
+                # mods is listed, but its text may be exactly what is being kept
+                # from everyone else (an invite link, a note), so it isn't shown.
+                text = f"Available to {_ROLE_LABELS.get(c.min_role, 'some chatters').lower()} only."
             payload.append(
                 {
                     "name": c.name,

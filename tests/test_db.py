@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 
 from conftest import run
@@ -133,5 +134,42 @@ def test_leaderboards_and_timers_and_lists(make_db):
         assert await db.add_filter_value("term", "x", "1") and not await db.add_filter_value("term", "x", "1")
         assert await db.list_filter_values("term") == ["x"]
         assert await db.remove_filter_value("term", "x")
+
+    run(go())
+
+
+def test_an_empty_name_never_overwrites_a_known_one(make_db):
+    async def go():
+        db = await make_db()
+        await db.credit("1", "Alice", 10)
+        await db.credit("1", "", 5)
+        assert (await db.get_stats("1"))["display_name"] == "Alice"
+        await db.credit("1", "Alicia", 1)  # a real rename still applies
+        assert (await db.get_stats("1"))["display_name"] == "Alicia"
+
+    run(go())
+
+
+def test_find_by_name_prefers_the_most_recently_active_holder(make_db):
+    async def go():
+        db = await make_db()
+        await db.credit("10", "SharedName", 500)  # previous owner, now stale
+        await asyncio.sleep(0.01)
+        await db.credit("11", "SharedName", 1)
+        assert await db.find_by_name("sharedname") == ("11", "SharedName")
+
+    run(go())
+
+
+def test_database_files_are_private_to_the_owner(tmp_path, make_db):
+    import stat
+
+    async def go():
+        db = await make_db("private.db")
+        await db.credit("1", "Alice", 1)
+        backup = tmp_path / "backups" / "copy.db"
+        await db.backup_to(backup)
+        for path in (tmp_path / "private.db", backup):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
 
     run(go())

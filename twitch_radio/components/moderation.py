@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from twitchio.ext import commands
 
+from twitch_radio.textutil import parse_int, parse_uint
 from twitch_radio.toggles import TOGGLE_KEYS, FeatureToggles
 from twitch_radio.tunables import TUNABLE_BOUNDS, TwitchTunables
 
@@ -57,11 +58,11 @@ class ModerationComponent(commands.Component):
             current = TwitchTunables.from_dict(await self.bot.tunables_store.read()).to_dict()[key]
             await self.bot.safe_reply(ctx, f"{key} = {current} (allowed {lo}-{hi})")
             return
-        try:
-            value = int(parts[1])
-        except ValueError:
+        parsed_value = parse_int(parts[1])
+        if parsed_value is None:
             await self.bot.safe_reply(ctx, f"{key}: not a number.")
             return
+        value = parsed_value
         if not lo <= value <= hi:
             await self.bot.safe_reply(ctx, f"{key}: must be between {lo} and {hi}.")
             return
@@ -110,7 +111,8 @@ class ModerationComponent(commands.Component):
             return
         tunables = TwitchTunables.from_dict(await self.bot.tunables_store.read())
         lo, hi = TUNABLE_BOUNDS["permit_default_seconds"]
-        length = int(seconds) if seconds.isdigit() and lo <= int(seconds) <= hi else tunables.permit_default_seconds
+        requested = parse_uint(seconds)
+        length = requested if requested is not None and lo <= requested <= hi else tunables.permit_default_seconds
         self.bot.automod.permit(login, length)
         await self.bot.safe_reply(ctx, f"@{login} may post links for the next {length}s.")
 

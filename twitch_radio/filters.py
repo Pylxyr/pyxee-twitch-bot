@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
@@ -17,7 +18,9 @@ REASON_TERM = "term"
 _TLDS = (
     "com", "net", "org", "io", "gg", "tv", "ly", "xyz", "info", "gl", "cc", "ws", "fm", "app", "dev",
     "ai", "sh", "biz", "online", "site", "store", "club", "shop", "link", "click", "top", "vip", "icu",
-    "pw", "live",
+    "pw", "live", "ru", "cn", "tk", "ml", "ga", "cf", "gq", "buzz", "fun", "life", "world", "today",
+    "cloud", "pro", "tech", "space", "website", "page", "art", "one", "lol", "wtf", "gift", "gifts",
+    "bet", "casino", "win", "bid", "stream", "tube", "video", "chat", "games", "game", "work", "rest",
 )
 _URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
 _BARE_RE = re.compile(
@@ -25,6 +28,41 @@ _BARE_RE = re.compile(
     r"(?:[/:?#][^\s<>\"']*)?",
     re.IGNORECASE,
 )
+
+
+# Lookalike letters people substitute to slip past a word list. Deliberately
+# small: Unicode compatibility decomposition (below) already folds fullwidth
+# letters, ligatures, circled/mathematical alphabets and accents; this covers
+# the common Cyrillic and Greek homoglyphs it doesn't.
+_CONFUSABLES = str.maketrans(
+    {
+        "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c",
+        "т": "t", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w",
+        "α": "a", "β": "b", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t",
+        "υ": "u", "χ": "x", "ɡ": "g", "ɑ": "a", "ı": "i", "ӏ": "l",
+    }
+)
+
+
+def normalize_for_matching(text: str) -> str:
+    """The form of `text` that filters compare against: compatibility-decomposed,
+    with combining marks (zalgo, accents) and invisible format characters
+    (zero-width spaces/joiners, soft hyphens, bidi controls) removed, common
+    homoglyphs mapped to Latin, and case folded. Used for *matching only* —
+    the original text is what's shown, logged and deleted."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    kept = "".join(c for c in decomposed if unicodedata.category(c) not in ("Mn", "Cf"))
+    return kept.casefold().translate(_CONFUSABLES)
+
+
+_DEOBFUSCATE_BRACKETED_DOT = re.compile(r"\s*[\[\(\{<]\s*(?:\.|dot)\s*[\]\)\}>]\s*", re.IGNORECASE)
+
+
+def deobfuscate_links(text: str) -> str:
+    """'example[.]com' and 'example(dot)com' -> 'example.com'. A bare spoken
+    "dot" is deliberately not treated as a dot: "the dot com bubble" is
+    ordinary speech, and flagging it would cost more than it catches."""
+    return _DEOBFUSCATE_BRACKETED_DOT.sub(".", text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +103,7 @@ def find_link(text: str, allowed_domains: Iterable[str] = ()) -> str | None:
     """First link in `text` whose host isn't allow-listed, else None. Catches
     scheme/www links and bare domains like `discord.gg/x`."""
     allowed = tuple(normalize_domain(d) for d in allowed_domains)
+    text = deobfuscate_links(normalize_for_matching(text))
     for pattern in (_URL_RE, _BARE_RE):
         for match in pattern.finditer(text):
             host = normalize_domain(match.group(0))
@@ -74,7 +113,8 @@ def find_link(text: str, allowed_domains: Iterable[str] = ()) -> str | None:
 
 
 class TermMatcher:
-    """Case-insensitive whole-word matching against a blocklist."""
+    """Whole-word matching against a blocklist, after both sides go through
+    normalize_for_matching (case, accents, zero-width characters, homoglyphs)."""
 
     def __init__(self, terms: Iterable[str] = ()) -> None:
         self._terms: tuple[str, ...] = ()
@@ -86,15 +126,15 @@ class TermMatcher:
         return self._terms
 
     def set_terms(self, terms: Iterable[str]) -> None:
-        cleaned = sorted({t.strip().lower() for t in terms if t.strip()})
+        cleaned = sorted({normalize_for_matching(t).strip() for t in terms if t.strip()} - {""})
         self._terms = tuple(cleaned)
         self._re = (
             re.compile("|".join(rf"(?<!\w){re.escape(t)}(?!\w)" for t in cleaned), re.IGNORECASE) if cleaned else None
         )
 
     def find(self, text: str) -> str | None:
-        match = self._re.search(text) if self._re else None
-        return match.group(0).lower() if match else None
+        match = self._re.search(normalize_for_matching(text)) if self._re else None
+        return match.group(0) if match else None
 
 
 def evaluate(

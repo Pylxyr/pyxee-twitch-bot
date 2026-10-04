@@ -7,6 +7,7 @@ from twitchio.exceptions import HTTPException
 from twitchio.ext import commands
 
 from twitch_radio.predictions import CreatedPrediction, PredictionManager, parse_start_args
+from twitch_radio.textutil import parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -92,10 +93,11 @@ class PredictionsComponent(commands.Component):
             if manager.current is None:
                 await self.bot.safe_reply(ctx, "No prediction running.")
                 return
-            if not rest.isdigit() or not 1 <= int(rest) <= len(manager.current.outcome_titles):
+            choice = parse_uint(rest)
+            if choice is None or not 1 <= choice <= len(manager.current.outcome_titles):
                 await self.bot.safe_reply(ctx, "Usage: !predict resolve <outcome number>")
                 return
-            winning_title = await self._call(ctx, manager.resolve(int(rest)))
+            winning_title = await self._call(ctx, manager.resolve(choice))
             if winning_title:
                 await self.bot.safe_reply(ctx, f"Prediction resolved: {winning_title} wins!")
         elif sub == "cancel":

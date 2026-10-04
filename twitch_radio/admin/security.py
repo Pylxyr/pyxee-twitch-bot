@@ -185,3 +185,36 @@ class RequestRateLimiter:
             return False
         self._hits.add(key)
         return True
+
+
+class ConnectionLimiter:
+    """Caps simultaneous long-lived connections (the chat WebSocket) per client
+    and in total, so a script can't hold open thousands of sockets. acquire()
+    says whether this one may open; release() must follow in a `finally`."""
+
+    def __init__(self, max_per_key: int, max_total: int) -> None:
+        self._max_per_key = max_per_key
+        self._max_total = max_total
+        self._open: dict[str, int] = {}
+        self._total = 0
+
+    def acquire(self, key: str) -> bool:
+        if self._total >= self._max_total or self._open.get(key, 0) >= self._max_per_key:
+            return False
+        self._open[key] = self._open.get(key, 0) + 1
+        self._total += 1
+        return True
+
+    def release(self, key: str) -> None:
+        count = self._open.get(key, 0)
+        if count <= 0:
+            return
+        self._total -= 1
+        if count == 1:
+            del self._open[key]
+        else:
+            self._open[key] = count - 1
+
+    @property
+    def total(self) -> int:
+        return self._total

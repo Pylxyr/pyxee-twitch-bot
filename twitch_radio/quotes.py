@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 
 from twitch_radio.db import Quote
+from twitch_radio.textutil import parse_uint
 
 MAX_QUOTE_LENGTH = 400
 
@@ -16,4 +17,4 @@ def format_quote(quote: Quote) -> str:
 
 def parse_quote_id(raw: str) -> int | None:
     raw = raw.strip().lstrip("#")
-    return int(raw) if raw.isdigit() else None
+    return parse_uint(raw)

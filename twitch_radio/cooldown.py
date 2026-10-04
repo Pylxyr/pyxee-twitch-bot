@@ -11,8 +11,9 @@ class CooldownTracker:
     unrelated commands.
     """
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic, max_keys: int = 10_000) -> None:
         self._clock = clock
+        self._max_keys = max_keys
         self._last_used_at: dict[str, float] = {}
 
     def remaining(self, key: str, cooldown_seconds: float) -> float:
@@ -27,4 +28,10 @@ class CooldownTracker:
         return remaining if remaining > 0 else 0.0
 
     def mark(self, key: str) -> None:
+        self._last_used_at.pop(key, None)  # re-insert so dict order is oldest-use first
         self._last_used_at[key] = self._clock()
+        if len(self._last_used_at) > self._max_keys:
+            # Per-chatter keys would otherwise accumulate for the life of the
+            # process. The oldest uses are the ones whose cooldown has long ended.
+            for stale in list(self._last_used_at)[: self._max_keys // 2]:
+                del self._last_used_at[stale]

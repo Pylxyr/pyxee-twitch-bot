@@ -9,7 +9,7 @@ from aiohttp import web
 
 from twitch_radio.admin.context import AdminContext, forwarded_host, is_https
 from twitch_radio.admin.security import fetch_site_ok, origin_matches_host, safe_next_path
-from twitch_radio.netutil import looks_proxied
+from twitch_radio.netutil import host_without_port, is_loopback_host, looks_proxied
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +41,13 @@ def redirect(location: str) -> web.Response:
 
 def locked_response() -> web.Response:
     return protect(web.Response(status=403, text=_LOCKED_MESSAGE))
+
+
+_BAD_HOST_MESSAGE = (
+    "Refusing this request: with no password set, /settings only answers to localhost, 127.0.0.1 or [::1] "
+    "(this stops a malicious web page from reaching it through a DNS-rebinding trick). Open it at "
+    "http://localhost:<port>/settings, or set TWITCH_SETTINGS_PASSWORD."
+)
 
 
 def session_token(request: web.Request) -> str | None:
@@ -87,7 +94,15 @@ def _login_required(request: web.Request) -> web.Response:
 def authorize(ctx: AdminContext, request: web.Request) -> web.Response | None:
     """None to proceed; otherwise the response to return as-is."""
     if ctx.settings_password is None:
-        if ctx.allow_open or _is_local(ctx, request):
+        if ctx.allow_open:
+            return None
+        if _is_local(ctx, request):
+            # The Origin check compares against the Host header, which a
+            # DNS-rebinding page controls, so password-less access additionally
+            # insists the Host actually names this machine.
+            if not is_loopback_host(host_without_port(request.headers.get("Host"))):
+                log.warning("Refused password-less /settings request with Host %r.", request.headers.get("Host"))
+                return protect(web.Response(status=403, text=_BAD_HOST_MESSAGE))
             return None
         return locked_response()
     if is_signed_in(ctx, request):

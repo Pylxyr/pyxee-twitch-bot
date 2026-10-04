@@ -105,3 +105,19 @@ def test_commands_page_truncates_long_custom_descriptions():
     html = build_commands_page("!", has_logo=False, custom=custom)
     assert "x" * (_MAX_CUSTOM_DESCRIPTION + 50) not in html
     assert "\u2026" in html
+
+
+def test_commands_page_does_not_publish_role_restricted_responses():
+    html = build_commands_page(
+        "!",
+        has_logo=False,
+        custom=[
+            CustomCommand("hello", "Hi there, public text", 0, -1, "everyone"),
+            CustomCommand("subdiscord", "Sub-only invite: https://discord.gg/SECRET-SUB-INVITE", 0, -1, "subscriber"),
+            CustomCommand("modnote", "Mod-only: the alt account password is hunter2", 0, -1, "moderator"),
+        ],
+    )
+    assert "Hi there, public text" in html  # public commands are shown in full
+    assert "SECRET-SUB-INVITE" not in html and "hunter2" not in html
+    assert "subdiscord" in html and "modnote" in html  # but the commands themselves are still listed
+    assert "Available to subscribers only." in html and "Available to moderators only." in html

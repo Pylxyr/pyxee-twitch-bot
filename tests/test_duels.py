@@ -72,3 +72,33 @@ def test_accept_fails_cleanly_if_loser_can_no_longer_afford_it(make_db):
         assert (await db.get_stats("1"))["points"] == 100  # untouched — nothing was deducted
 
     run(go())
+
+
+def test_winner_keeps_their_display_name_and_stays_findable(make_db):
+    async def go():
+        db = await make_db()
+        await db.credit("1", "Alice", 100)
+        await db.credit("2", "Bob", 100)
+        dm = DuelManager(db, rng=random.Random(0))
+        dm.challenge("1", "Alice", "2", 50, timeout_seconds=60)
+        result = await dm.accept("2", "Bob", challenger_win_chance_percent=100)
+        assert result == ("Alice", 50)
+        assert (await db.get_stats("1"))["display_name"] == "Alice"
+        assert await db.find_by_name("alice") == ("1", "Alice")
+        assert [name for name, _ in await db.top_points()] == ["Alice", "Bob"]
+
+    run(go())
+
+
+def test_cant_cover_message_names_whoever_actually_cant(make_db):
+    async def go():
+        db = await make_db()
+        await db.credit("1", "Alice", 100)
+        await db.credit("2", "Bob", 100)
+        dm = DuelManager(db, rng=random.Random(0))
+        dm.challenge("1", "Alice", "2", 80, timeout_seconds=60)
+        await db.transfer("2", "1", "Alice", 90)  # Bob drops below the stake after the challenge was made
+        message = await dm.accept("2", "Bob", challenger_win_chance_percent=100)
+        assert isinstance(message, str) and "@Bob" in message and "Alice" not in message
+
+    run(go())

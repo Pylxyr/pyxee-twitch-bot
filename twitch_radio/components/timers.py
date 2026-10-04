@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from twitchio.ext import commands
 
 from twitch_radio.customcommands import clean_name
+from twitch_radio.textutil import parse_uint
 from twitch_radio.timers import MAX_MIN_MESSAGES, TimerScheduler, parse_add
 from twitch_radio.toggles import FeatureToggles
 
@@ -83,11 +84,12 @@ class TimersComponent(commands.Component):
         elif sub == "min":
             name_text, _, count_text = rest.partition(" ")
             target = clean_name(name_text)
-            if target is None or not count_text.strip().isdigit() or int(count_text) > MAX_MIN_MESSAGES:
+            min_messages = parse_uint(count_text)
+            if target is None or min_messages is None or min_messages > MAX_MIN_MESSAGES:
                 await self.bot.safe_reply(ctx, f"Usage: !timer min <name> <0-{MAX_MIN_MESSAGES}>")
                 return
-            found = await db.set_timer_min_messages(target, int(count_text))
-            await self.bot.safe_reply(ctx, f"Timer {target} needs {int(count_text)} chat messages." if found else f"No timer named {target}.")
+            found = await db.set_timer_min_messages(target, min_messages)
+            await self.bot.safe_reply(ctx, f"Timer {target} needs {min_messages} chat messages." if found else f"No timer named {target}.")
         elif sub == "list":
             timers = await db.list_timers()
             if not timers:

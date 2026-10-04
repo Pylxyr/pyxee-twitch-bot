@@ -23,7 +23,7 @@ class EconomyComponent(commands.Component):
         if target:
             found = await self.bot.db.find_by_name(target)
             if found is None:
-                await self.bot.safe_reply(ctx, f"I haven't seen {target} in chat yet.")
+                await self.bot.safe_reply(ctx, f"I haven't seen {self.bot.automod.scrub(target, 32)} in chat yet.")
                 return
             await self.bot.safe_reply(ctx, await self.bot.economy.points_line(found[0], found[1]))
             return

@@ -30,7 +30,7 @@ class DuelManager:
     ) -> None:
         self._db = db
         self._clock = clock
-        self._rng = rng or random.Random()
+        self._rng = rng or random.SystemRandom()
         self._pending: dict[str, Challenge] = {}  # keyed by target_id — one open challenge per target
 
     def _expire(self, target_id: str) -> None:
@@ -73,7 +73,8 @@ class DuelManager:
             (challenge.challenger_id, challenge.challenger_name) if challenger_wins else (target_id, target_name)
         )
         loser_id = target_id if challenger_wins else challenge.challenger_id
-        result = await self._db.settle_duel(winner_id, loser_id, challenge.amount)
+        loser_name = target_name if challenger_wins else challenge.challenger_name
+        result = await self._db.settle_duel(winner_id, loser_id, challenge.amount, winner_name=winner_name)
         if result is None:
-            return f"@{challenge.challenger_name} can't cover that bet anymore — duel's off."
+            return f"@{loser_name} can't cover that bet anymore — duel's off."
         return winner_name, challenge.amount

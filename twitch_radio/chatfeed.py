@@ -82,6 +82,10 @@ class ChatEntry:
     text: str
     at: float  # time.monotonic() — a reference for age pruning, never shown as a clock time
     fragments: list[dict[str, object]] = field(default_factory=list)
+    # Twitch's own IDs, kept only so a Twitch-side delete or ban can take the
+    # message off the overlay. Never included in snapshot(), which is public.
+    message_id: str = ""
+    user_id: str = ""
 
 
 class ChatFeed:
@@ -110,9 +114,18 @@ class ChatFeed:
         cutoff = time.monotonic() - self._max_age_seconds
         self._entries = [e for e in self._entries if e.at >= cutoff][-self._max_messages :]
 
-    def append(self, author: str, text: str, fragments: list[dict[str, object]] | None = None) -> None:
+    def append(
+        self,
+        author: str,
+        text: str,
+        fragments: list[dict[str, object]] | None = None,
+        *,
+        message_id: str = "",
+        user_id: str = "",
+    ) -> None:
         """`fragments` (see fragments_to_dicts) carries emotes as images-to-be;
-        without it the message is shown as plain text."""
+        without it the message is shown as plain text. `message_id`/`user_id`
+        let remove_message()/remove_user() find it again."""
         text = text.strip()
         if not text:
             return
@@ -122,11 +135,35 @@ class ChatFeed:
             text=text,
             at=time.monotonic(),
             fragments=fragments or [{"type": "text", "text": text}],
+            message_id=message_id,
+            user_id=user_id,
         )
         self._next_id += 1
         self._entries.append(entry)
         self._prune()
         self._notify_state_changed()
+
+    def remove_message(self, message_id: str) -> bool:
+        """Drops one message (a moderator deleted it on Twitch). True if it was shown."""
+        if not message_id:
+            return False
+        kept = [e for e in self._entries if e.message_id != message_id]
+        if len(kept) == len(self._entries):
+            return False
+        self._entries = kept
+        self._notify_state_changed()
+        return True
+
+    def remove_user(self, user_id: str) -> int:
+        """Drops everything one user said (they were banned or timed out)."""
+        if not user_id:
+            return 0
+        kept = [e for e in self._entries if e.user_id != user_id]
+        removed = len(self._entries) - len(kept)
+        if removed:
+            self._entries = kept
+            self._notify_state_changed()
+        return removed
 
     def snapshot(self) -> list[dict[str, object]]:
         """Each entry's age at the moment of the call, not a raw
